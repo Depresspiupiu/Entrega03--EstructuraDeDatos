@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import sqlite3
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from contextlib import closing
@@ -81,6 +82,140 @@ class SimulationLedgerTests(unittest.TestCase):
         )
 
         self.assertEqual(self.ledger.cash_balance("COP"), Decimal("1009700"))
+
+    def test_income_valuation_and_portfolio_returns_include_fees(self) -> None:
+        self.ledger.trade("TEST", "COMPRA", "2", "100", commission="5")
+        self.ledger.update_valuation("TEST", "ACCIONES", "USD", "120")
+        self.ledger.record_income(
+            "TEST", "ACCIONES", "DIVIDENDO", "10", commission="1"
+        )
+
+        summary = self.ledger.portfolio_summary("USD")
+
+        self.assertEqual(summary.cash_balance, Decimal("804"))
+        self.assertEqual(summary.invested_value, Decimal("205"))
+        self.assertEqual(summary.market_value, Decimal("240"))
+        self.assertEqual(summary.total_value, Decimal("1044"))
+        self.assertEqual(summary.equity_value, Decimal("240"))
+        self.assertEqual(summary.fixed_income_value, Decimal("0"))
+        self.assertEqual(summary.income_total, Decimal("10"))
+        self.assertEqual(summary.costs_total, Decimal("6"))
+        self.assertEqual(summary.cumulative_return_pct, Decimal("4.400"))
+        self.assertEqual(summary.positions[0].unit_price, Decimal("120"))
+        self.assertEqual(summary.positions[0].market_value, Decimal("240"))
+
+    def test_fixed_income_terms_accrue_value_until_maturity(self) -> None:
+        self.ledger.set_initial_cash("COP", "1000")
+        self.ledger.trade(
+            "CDT-1",
+            "COMPRA",
+            "1",
+            "100",
+            asset_type="CDT",
+            operation_date="2025-01-01",
+            currency="COP",
+        )
+        self.ledger.set_instrument_terms(
+            "CDT-1", "CDT", "COP", "10", "2025-12-31"
+        )
+
+        summary = self.ledger.portfolio_summary("COP")
+
+        self.assertGreater(summary.market_value, Decimal("109"))
+        self.assertLess(summary.market_value, Decimal("111"))
+        self.assertEqual(summary.fixed_income_value, summary.market_value)
+        self.assertEqual(summary.equity_value, Decimal("0"))
+        self.assertEqual(summary.positions[0].annual_rate_pct, Decimal("10"))
+        self.assertEqual(summary.positions[0].maturity_date, "2025-12-31")
+
+    def test_paid_fixed_income_interest_is_not_double_counted(self) -> None:
+        self.ledger.set_initial_cash("COP", "1000")
+        self.ledger.trade(
+            "CDT-2",
+            "COMPRA",
+            "1",
+            "100",
+            asset_type="CDT",
+            operation_date="2025-01-01",
+            currency="COP",
+        )
+        self.ledger.set_instrument_terms(
+            "CDT-2", "CDT", "COP", "10", "2030-01-01"
+        )
+        self.ledger.record_income(
+            "CDT-2",
+            "CDT",
+            "INTERES",
+            "5",
+            operation_date="2025-07-01",
+            currency="COP",
+        )
+
+        summary = self.ledger.portfolio_summary("COP")
+        days = (date.today() - date(2025, 1, 1)).days
+        expected_value = (
+            Decimal("100")
+            * (Decimal("1.1") ** (Decimal(days) / Decimal("365.25")))
+            - Decimal("5")
+        )
+
+        self.assertAlmostEqual(
+            float(summary.market_value), float(expected_value), places=5
+        )
+
+    def test_principal_payment_reduces_units_and_adds_net_cash(self) -> None:
+        self.ledger.set_initial_cash("COP", "1000")
+        self.ledger.trade(
+            "TES-1", "COMPRA", "10", "10", asset_type="TES", currency="COP"
+        )
+        self.ledger.record_income(
+            "TES-1",
+            "TES",
+            "PAGO_CAPITAL",
+            "20",
+            quantity="2",
+            commission="1",
+            currency="COP",
+        )
+
+        self.assertEqual(
+            self.ledger.positions()["TES: TES-1 (COP)"], Decimal("8")
+        )
+        self.assertEqual(self.ledger.cash_balance("COP"), Decimal("919"))
+        summary = self.ledger.portfolio_summary("COP")
+        self.assertEqual(summary.income_total, Decimal("20"))
+        self.assertEqual(summary.invested_value, Decimal("80"))
+
+    def test_rejects_income_for_unowned_assets_and_excess_principal(self) -> None:
+        with self.assertRaises(SimulationError):
+            self.ledger.record_income("TEST", "ACCIONES", "DIVIDENDO", "1")
+
+        self.ledger.trade("TES-1", "COMPRA", "1", "10", asset_type="TES")
+        with self.assertRaises(SimulationError):
+            self.ledger.record_income(
+                "TES-1", "TES", "PAGO_CAPITAL", "1", quantity="2"
+            )
+
+    def test_income_can_be_recorded_for_past_holding_after_it_was_sold(self) -> None:
+        self.ledger.trade(
+            "TEST", "COMPRA", "1", "100", operation_date="2025-01-01"
+        )
+        self.ledger.trade(
+            "TEST", "VENTA", "1", "110", operation_date="2025-02-01"
+        )
+
+        self.ledger.record_income(
+            "TEST",
+            "ACCIONES",
+            "DIVIDENDO",
+            "5",
+            operation_date="2025-01-15",
+        )
+
+        self.assertEqual(self.ledger.cash_balance(), Decimal("1015"))
+        self.assertEqual(
+            self.ledger.portfolio_summary("USD").income_total, Decimal("5")
+        )
 
     def test_commission_is_included_in_purchase_balance_validation(self) -> None:
         with self.assertRaises(SimulationError):

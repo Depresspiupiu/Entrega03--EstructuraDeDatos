@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QDateEdit,
     QInputDialog,
     QTableWidget,
@@ -55,7 +56,7 @@ class FinanceWindow(QMainWindow):
         self.worker: AnalysisWorker | None = None
 
         self.setWindowTitle("FinSim - Analisis y trading simulado")
-        self.resize(1060, 760)
+        self.resize(1220, 900)
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -154,6 +155,64 @@ class FinanceWindow(QMainWindow):
         trade_details.addWidget(self.currency_input)
         layout.addLayout(trade_details)
 
+        valuation_controls = QHBoxLayout()
+        self.valuation_input = QDoubleSpinBox()
+        self.valuation_input.setRange(0.01, 1_000_000_000_000)
+        self.valuation_input.setDecimals(4)
+        self.valuation_button = QPushButton("Actualizar valoración")
+        self.valuation_button.clicked.connect(self._update_valuation)
+        self.annual_rate_input = QDoubleSpinBox()
+        self.annual_rate_input.setRange(0, 1_000)
+        self.annual_rate_input.setDecimals(4)
+        self.maturity_input = QDateEdit()
+        self.maturity_input.setCalendarPopup(True)
+        self.maturity_input.setDisplayFormat("yyyy-MM-dd")
+        self.maturity_input.setDate(QDate.currentDate())
+        self.save_terms_button = QPushButton("Guardar condiciones de renta fija")
+        self.save_terms_button.clicked.connect(self._save_fixed_terms)
+        valuation_controls.addWidget(QLabel("Valor actual unitario:"))
+        valuation_controls.addWidget(self.valuation_input)
+        valuation_controls.addWidget(self.valuation_button)
+        valuation_controls.addWidget(QLabel("Tasa E.A. (%):"))
+        valuation_controls.addWidget(self.annual_rate_input)
+        valuation_controls.addWidget(QLabel("Vencimiento:"))
+        valuation_controls.addWidget(self.maturity_input)
+        valuation_controls.addWidget(self.save_terms_button)
+        layout.addLayout(valuation_controls)
+
+        income_controls = QHBoxLayout()
+        self.income_type_input = QComboBox()
+        for label, value in (
+            ("Dividendo", "DIVIDENDO"),
+            ("Interés", "INTERES"),
+            ("Pago de capital", "PAGO_CAPITAL"),
+        ):
+            self.income_type_input.addItem(label, value)
+        self.income_type_input.currentIndexChanged.connect(
+            self._income_type_changed
+        )
+        self.income_amount_input = QDoubleSpinBox()
+        self.income_amount_input.setRange(0.01, 1_000_000_000_000)
+        self.income_amount_input.setDecimals(2)
+        self.income_commission_input = QDoubleSpinBox()
+        self.income_commission_input.setRange(0, 1_000_000_000_000)
+        self.income_commission_input.setDecimals(2)
+        self.repaid_quantity_input = QDoubleSpinBox()
+        self.repaid_quantity_input.setRange(0.001, 1_000_000)
+        self.repaid_quantity_input.setDecimals(3)
+        self.record_income_button = QPushButton("Registrar rendimiento")
+        self.record_income_button.clicked.connect(self._record_income)
+        income_controls.addWidget(QLabel("Rendimiento:"))
+        income_controls.addWidget(self.income_type_input)
+        income_controls.addWidget(QLabel("Valor bruto:"))
+        income_controls.addWidget(self.income_amount_input)
+        income_controls.addWidget(QLabel("Comisión:"))
+        income_controls.addWidget(self.income_commission_input)
+        income_controls.addWidget(QLabel("Unidades amortizadas:"))
+        income_controls.addWidget(self.repaid_quantity_input)
+        income_controls.addWidget(self.record_income_button)
+        layout.addLayout(income_controls)
+
         trade_buttons = QHBoxLayout()
         self.buy_button = QPushButton("Compra simulada")
         self.sell_button = QPushButton("Venta simulada")
@@ -169,7 +228,11 @@ class FinanceWindow(QMainWindow):
 
         self.cash_label = QLabel()
         self.positions_label = QLabel()
+        self.positions_label.setWordWrap(True)
+        self.portfolio_label = QLabel()
+        self.portfolio_label.setWordWrap(True)
         layout.addWidget(self.cash_label)
+        layout.addWidget(self.portfolio_label)
         layout.addWidget(self.positions_label)
 
         self.trade_log = QTableWidget(0, 9)
@@ -191,7 +254,29 @@ class FinanceWindow(QMainWindow):
         layout.addWidget(QLabel("Registro local de operaciones simuladas"))
         layout.addWidget(self.trade_log)
 
-        self.setCentralWidget(root)
+        self.income_log = QTableWidget(0, 8)
+        self.income_log.setHorizontalHeaderLabels(
+            [
+                "Fecha",
+                "Tipo de activo",
+                "Instrumento",
+                "Rendimiento",
+                "Moneda",
+                "Valor bruto",
+                "Unidades amortizadas",
+                "Comisión",
+            ]
+        )
+        self.income_log.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.income_log.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(QLabel("Historial de dividendos, intereses y pagos de capital"))
+        layout.addWidget(self.income_log)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(root)
+        self.setCentralWidget(scroll_area)
+        self._income_type_changed()
         self._asset_type_changed()
         self._refresh_portfolio()
 
@@ -232,6 +317,13 @@ class FinanceWindow(QMainWindow):
         self, snapshots: list[StockSnapshot], errors: list[str]
     ) -> None:
         self.snapshots = {snapshot.symbol: snapshot for snapshot in snapshots}
+        for snapshot in snapshots:
+            try:
+                self.ledger.update_valuation(
+                    snapshot.symbol, "ACCIONES", "USD", snapshot.price
+                )
+            except SimulationError as exc:
+                errors.append(str(exc))
         ordered = sorted(snapshots, key=lambda snapshot: snapshot.score, reverse=True)
 
         self.stock_table.setRowCount(len(ordered))
@@ -274,6 +366,7 @@ class FinanceWindow(QMainWindow):
                 "No se pudieron analizar algunos simbolos:\n\n"
                 + "\n".join(errors),
             )
+        self._refresh_portfolio()
 
     def _selection_changed(self) -> None:
         items = self.stock_table.selectedItems()
@@ -289,11 +382,85 @@ class FinanceWindow(QMainWindow):
         )
         self.instrument_input.setText(symbol)
         self.price_input.setValue(self.snapshots[symbol].price)
+        self.valuation_input.setValue(self.snapshots[symbol].price)
 
     def _asset_type_changed(self) -> None:
         asset_type = self.asset_type_input.currentData()
         self.currency_input.setCurrentText(
             "USD" if asset_type == "ACCIONES" else "COP"
+        )
+        is_fixed_income = asset_type in {"CDT", "BONOS", "TES"}
+        self.annual_rate_input.setEnabled(is_fixed_income)
+        self.maturity_input.setEnabled(is_fixed_income)
+        self.save_terms_button.setEnabled(is_fixed_income)
+
+    def _income_type_changed(self) -> None:
+        self.repaid_quantity_input.setEnabled(
+            self.income_type_input.currentData() == "PAGO_CAPITAL"
+        )
+
+    def _update_valuation(self) -> None:
+        try:
+            price = self.ledger.update_valuation(
+                self.instrument_input.text(),
+                self.asset_type_input.currentData(),
+                self.currency_input.currentText(),
+                self.valuation_input.value(),
+            )
+        except SimulationError as exc:
+            QMessageBox.warning(self, "Valoración no actualizada", str(exc))
+            return
+        self._refresh_portfolio()
+        QMessageBox.information(
+            self,
+            "Valoración actualizada",
+            f"Valor unitario de {self.instrument_input.text().strip().upper()}: "
+            f"{price:,.4f} {self.currency_input.currentText()}.",
+        )
+
+    def _save_fixed_terms(self) -> None:
+        try:
+            self.ledger.set_instrument_terms(
+                self.instrument_input.text(),
+                self.asset_type_input.currentData(),
+                self.currency_input.currentText(),
+                self.annual_rate_input.value(),
+                self.maturity_input.date().toString("yyyy-MM-dd"),
+            )
+        except SimulationError as exc:
+            QMessageBox.warning(self, "Condiciones no guardadas", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Condiciones guardadas",
+            f"Tasa E.A.: {self.annual_rate_input.value():.4f}% · "
+            f"vencimiento: "
+            f"{self.maturity_input.date().toString('yyyy-MM-dd')}.",
+        )
+
+    def _record_income(self) -> None:
+        try:
+            self.ledger.record_income(
+                self.instrument_input.text(),
+                self.asset_type_input.currentData(),
+                self.income_type_input.currentData(),
+                self.income_amount_input.value(),
+                operation_date=self.operation_date_input.date().toString(
+                    "yyyy-MM-dd"
+                ),
+                quantity=self.repaid_quantity_input.value(),
+                commission=self.income_commission_input.value(),
+                currency=self.currency_input.currentText(),
+            )
+        except SimulationError as exc:
+            QMessageBox.warning(self, "Rendimiento no registrado", str(exc))
+            return
+        self._refresh_portfolio()
+        QMessageBox.information(
+            self,
+            "Rendimiento registrado",
+            f"{self.income_type_input.currentText()} registrado para "
+            f"{self.instrument_input.text().strip().upper()}.",
         )
 
     def _configure_initial_cash(self) -> None:
@@ -359,13 +526,61 @@ class FinanceWindow(QMainWindow):
             f"Saldos simulados — USD: {self.ledger.cash_balance('USD'):,.2f}  |  "
             f"COP: {self.ledger.cash_balance('COP'):,.2f}"
         )
-        positions = self.ledger.positions()
-        description = ", ".join(
-            f"{instrument}: {quantity}"
-            for instrument, quantity in sorted(positions.items())
+        summaries = [
+            self.ledger.portfolio_summary(currency)
+            for currency in ("USD", "COP")
+        ]
+        summary_lines = []
+        for item in summaries:
+            fixed_income_pct = (
+                item.fixed_income_value / item.market_value * 100
+                if item.market_value > 0
+                else 0
+            )
+            equity_pct = (
+                item.equity_value / item.market_value * 100
+                if item.market_value > 0
+                else 0
+            )
+            annualized = (
+                f"{item.annualized_return_pct:+.2f}%"
+                if item.annualized_return_pct is not None
+                else "N/D"
+            )
+            summary_lines.append(
+                f"{item.currency}: invertido {item.invested_value:,.2f}, "
+                f"valor actual {item.total_value:,.2f}, "
+                f"renta fija {item.fixed_income_value:,.2f} "
+                f"({fixed_income_pct:.1f}%), "
+                f"renta variable {item.equity_value:,.2f} "
+                f"({equity_pct:.1f}%), "
+                f"ingresos {item.income_total:,.2f}, "
+                f"costos {item.costs_total:,.2f}, "
+                f"rentabilidad acumulada {item.cumulative_return_pct:+.2f}%, "
+                f"E.A. {annualized}"
+            )
+        self.portfolio_label.setText(
+            "Portafolio (sin conversión entre monedas): "
+            + "  |  ".join(summary_lines)
         )
+        position_lines = []
+        for summary in summaries:
+            for position in summary.positions:
+                details = (
+                    f"{position.symbol} ({position.asset_type}, "
+                    f"{summary.currency}): {position.quantity:f} × "
+                    f"{position.unit_price:,.4f} = "
+                    f"{position.market_value:,.2f} "
+                    f"(costo {position.cost_basis:,.2f})"
+                )
+                if position.annual_rate_pct is not None:
+                    details += f", tasa E.A. {position.annual_rate_pct}%"
+                if position.maturity_date:
+                    details += f", vence {position.maturity_date}"
+                position_lines.append(details)
         self.positions_label.setText(
-            "Posiciones simuladas: " + (description or "ninguna")
+            "Posiciones valoradas: "
+            + ("; ".join(position_lines) or "ninguna")
         )
 
         trades = self.ledger.recent_trades(15)
@@ -385,6 +600,23 @@ class FinanceWindow(QMainWindow):
             for column, value in enumerate(values):
                 self.trade_log.setItem(row, column, QTableWidgetItem(value))
         self.trade_log.resizeColumnsToContents()
+
+        income = self.ledger.recent_income(15)
+        self.income_log.setRowCount(len(income))
+        for row, event in enumerate(income):
+            values = (
+                event.operation_date,
+                event.asset_type,
+                event.symbol,
+                event.income_type,
+                event.currency,
+                f"{event.amount:,.2f}",
+                f"{event.quantity:f}" if event.quantity else "",
+                f"{event.commission:,.2f}",
+            )
+            for column, value in enumerate(values):
+                self.income_log.setItem(row, column, QTableWidgetItem(value))
+        self.income_log.resizeColumnsToContents()
 
 
 def create_application(database_path: Path) -> QApplication:
