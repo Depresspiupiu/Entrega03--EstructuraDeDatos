@@ -11,6 +11,12 @@ las posiciones y de la cartera en USD.
   meses para `KO` y `NKE`.
 - Gráfico de velas diarias con apertura, máximo, mínimo y cierre ajustados por
   Yahoo Finance.
+- Simulación histórica de 2023 para NYSE y NASDAQ. Inicia el calendario el
+  1 de enero; los precios se actualizan en días de mercado y se mantienen en
+  el último cierre durante fines de semana y festivos. El reloj avanza un día
+  simulado cada 5 segundos y muestra las horas junto a las gráficas.
+- Compra y venta manuales dentro de la simulación histórica, con validación
+  del efectivo disponible y de las acciones en cartera.
 - Compras y ventas simuladas con cantidad, fecha y comisión configurables. Las
   operaciones se registran al último cierre consultado; no se envían órdenes a
   un bróker.
@@ -69,3 +75,15 @@ python -m PyInstaller --noconfirm --clean FinSim.spec
 El ejecutable se genera en `dist\FinSim.exe`. Para crear la distribución
 portátil o dividida en archivos, consulta `FinSimPortable.spec` y
 `build_finsim_parts.bat`.
+
+El ejecutable individual incluye todas las dependencias y ocupa más espacio.
+Para generar un instalador y archivos de menos de 25 MB cada uno, ejecuta:
+
+```powershell
+.\build_finsim_parts.bat
+```
+
+La distribución aparece en `dist\FinSim-Partes`. Mantén juntos
+`FinSim-Setup.exe`, `FinSim-Partes.json` y todos los archivos
+`FinSim-Parte-*.zip`; el instalador los necesita para instalar y abrir FinSim.
+El límite de 25 MB es por archivo, no para el paquete completo.

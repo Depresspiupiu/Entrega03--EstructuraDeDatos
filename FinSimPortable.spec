@@ -29,13 +29,10 @@ binaries += tmp_ret[1]
 hiddenimports += tmp_ret[2]
 
 excluded_modules = [
-    'PIL',
-    'PIL.*',
     'PySide6.QtOpenGL',
     'PySide6.QtPdf',
     'PySide6.QtQml',
     'PySide6.QtQuick',
-    'PySide6.QtSvg',
     'PySide6.QtVirtualKeyboard',
 ]
 optional_qt_binaries = {
@@ -47,7 +44,6 @@ optional_qt_binaries = {
     'qt6qmlmodels.dll',
     'qt6qmlworkerscript.dll',
     'qt6quick.dll',
-    'qt6svg.dll',
     'qt6virtualkeyboard.dll',
 }
 matplotlib_data_files = {
