@@ -1,5 +1,15 @@
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
+
+
+@dataclass(frozen=True)
+class StockCandle:
+    day: date
+    open: float
+    high: float
+    low: float
+    close: float
 
 
 @dataclass(frozen=True)
@@ -9,8 +19,6 @@ class StockSnapshot:
     change_1d_pct: float
     change_1m_pct: float
     change_3m_pct: float
-    score: float
-    recommendation: str
 
 
 @dataclass(frozen=True)
