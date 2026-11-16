@@ -626,6 +626,7 @@ class SimulationLedger:
                                 unit_price * quantity - interest_received[key],
                             ) / quantity
             value = quantity * unit_price
+            unrealized_profit = value - cost_basis
             contract = terms.get(key)
             position_summaries.append(
                 PortfolioPosition(
@@ -635,6 +636,12 @@ class SimulationLedger:
                     unit_price=unit_price,
                     cost_basis=cost_basis,
                     market_value=value,
+                    unrealized_profit=unrealized_profit,
+                    unrealized_return_pct=(
+                        unrealized_profit / cost_basis * 100
+                        if cost_basis > 0
+                        else None
+                    ),
                     annual_rate_pct=contract[0] if contract else None,
                     maturity_date=(
                         contract[1].isoformat()

@@ -43,6 +43,8 @@ class PortfolioPosition:
     unit_price: Decimal
     cost_basis: Decimal
     market_value: Decimal
+    unrealized_profit: Decimal
+    unrealized_return_pct: Decimal | None
     annual_rate_pct: Decimal | None = None
     maturity_date: str | None = None
 

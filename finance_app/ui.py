@@ -1,4 +1,3 @@
-from decimal import Decimal
 from pathlib import Path
 
 import matplotlib.dates as mdates
@@ -26,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from finance_app.historical_ui import HistoricalSimulationWindow
 from finance_app.market_data import YFinanceMarketData
 from finance_app.models import StockCandle, StockSnapshot
 from finance_app.simulator import SimulationError, SimulationLedger
@@ -53,6 +53,7 @@ class FinanceWindow(QMainWindow):
         self.snapshots: dict[str, StockSnapshot] = {}
         self.candles: dict[str, tuple[StockCandle, ...]] = {}
         self.worker: MarketDataWorker | None = None
+        self.historical_window: HistoricalSimulationWindow | None = None
 
         self.setWindowTitle("FinSim | Coca-Cola y Nike")
         self.resize(1180, 900)
@@ -111,6 +112,16 @@ class FinanceWindow(QMainWindow):
         self.canvas = FigureCanvasQTAgg(self.figure)
         chart_group = QGroupBox("Gráfico de velas OHLC")
         chart_layout = QVBoxLayout(chart_group)
+        chart_header = QHBoxLayout()
+        chart_header.addStretch()
+        self.historical_simulation_button = QPushButton(
+            "Simulación histórica 2023"
+        )
+        self.historical_simulation_button.clicked.connect(
+            self._open_historical_simulation
+        )
+        chart_header.addWidget(self.historical_simulation_button)
+        chart_layout.addLayout(chart_header)
         chart_layout.addWidget(self.canvas)
         layout.addWidget(chart_group, 1)
 
@@ -168,7 +179,7 @@ class FinanceWindow(QMainWindow):
             QAbstractItemView.EditTrigger.NoEditTriggers
         )
         self.positions_table.horizontalHeader().setStretchLastSection(True)
-        positions_group = QGroupBox("Rentabilidad por acción")
+        positions_group = QGroupBox("Rentabilidad no realizada por inversión")
         positions_layout = QVBoxLayout(positions_group)
         positions_layout.addWidget(self.positions_table)
         layout.addWidget(positions_group)
@@ -217,6 +228,13 @@ class FinanceWindow(QMainWindow):
         self.worker.completed.connect(self._market_data_completed)
         self.worker.finished.connect(self._market_data_finished)
         self.worker.start()
+
+    def _open_historical_simulation(self) -> None:
+        if self.historical_window is None:
+            self.historical_window = HistoricalSimulationWindow(self)
+        self.historical_window.show()
+        self.historical_window.raise_()
+        self.historical_window.activateWindow()
 
     def _market_data_finished(self) -> None:
         self.refresh_button.setEnabled(True)
@@ -427,7 +445,7 @@ class FinanceWindow(QMainWindow):
         self.portfolio_label.setText(
             f"Saldo disponible: ${summary.cash_balance:,.2f} USD  |  "
             f"Valor total de cartera: ${summary.total_value:,.2f} USD  |  "
-            f"Ganancia/pérdida acumulada: ${profit:+,.2f} USD "
+            f"Rentabilidad de cartera sobre capital inicial: ${profit:+,.2f} USD "
             f"({summary.cumulative_return_pct:+.2f}%). "
             "El total conserva cualquier operación histórica de esta base local."
         )
@@ -460,19 +478,15 @@ class FinanceWindow(QMainWindow):
                     unrealized_profit = "N/D"
                     unrealized_return = "N/D"
                 else:
-                    market_value_value = position.quantity * Decimal(
-                        str(snapshot.price)
-                    )
-                    unrealized_value = market_value_value - position.cost_basis
-                    unrealized_pct = (
-                        unrealized_value / position.cost_basis * 100
-                        if position.cost_basis
-                        else Decimal("0")
-                    )
+                    market_value_value = position.market_value
                     current_price = f"${snapshot.price:,.2f}"
                     market_value = f"${market_value_value:,.2f}"
-                    unrealized_profit = f"${unrealized_value:+,.2f}"
-                    unrealized_return = f"{unrealized_pct:+.2f}%"
+                    unrealized_profit = f"${position.unrealized_profit:+,.2f}"
+                    unrealized_return = (
+                        f"{position.unrealized_return_pct:+.2f}%"
+                        if position.unrealized_return_pct is not None
+                        else "N/D"
+                    )
                 values = (
                     f"{STOCKS[symbol]} ({symbol})",
                     f"{position.quantity:f}",

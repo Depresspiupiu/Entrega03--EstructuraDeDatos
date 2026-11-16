@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Mapping, Sequence
 
 
@@ -13,6 +13,22 @@ class HistoricalDataError(RuntimeError):
 
 class SimulationCompleteError(RuntimeError):
     """Raised when the simulation has reached the last available date."""
+
+
+SIMULATED_DAY_SECONDS = 5
+
+
+class AcceleratedSimulationClock:
+    def __init__(self, start_date: date) -> None:
+        self.current_date = start_date
+        self.hour = 0
+
+    def advance_hour(self) -> tuple[date, int]:
+        self.hour += 1
+        if self.hour == 24:
+            self.hour = 0
+            self.current_date += timedelta(days=1)
+        return self.current_date, self.hour
 
 
 @dataclass(frozen=True)
@@ -124,6 +140,7 @@ class HistoricalPortfolioSimulation:
         initial_cash: float,
         start_date: date,
         *,
+        end_date: date | None = None,
         seed: int | None = None,
         random_initial_holdings: bool = False,
         initial_random_symbols: Sequence[str] | None = None,
@@ -162,14 +179,23 @@ class HistoricalPortfolioSimulation:
             raise HistoricalDataError(
                 "La fecha elegida no deja días de cotización disponibles en 2023."
             )
+        simulation_end_date = end_date or dates[-1]
+        if simulation_end_date < dates[start_index]:
+            raise HistoricalDataError(
+                "La fecha final debe incluir al menos un día de cotización."
+            )
 
         self.symbols = selected
         self.initial_cash = initial_cash
-        self.start_date = dates[start_index]
+        self.start_date = start_date
+        self.end_date = simulation_end_date
         self.market = market
         self._history = history
         self._dates = dates
         self._index = start_index
+        self._start_index = start_index
+        self._current_date = start_date
+        self._calendar_mode = start_date != dates[start_index]
         self._random = random.Random(seed)
         if initial_holdings is not None and (
             random_initial_holdings or initial_random_symbols is not None
@@ -259,7 +285,7 @@ class HistoricalPortfolioSimulation:
 
     @property
     def current_date(self) -> date:
-        return self._dates[self._index]
+        return self._current_date
 
     @property
     def current_value(self) -> float:
@@ -283,7 +309,7 @@ class HistoricalPortfolioSimulation:
 
     @property
     def is_complete(self) -> bool:
-        return self._index >= len(self._dates) - 1
+        return self._current_date >= self.end_date
 
     @property
     def candles(self) -> tuple[PortfolioCandle, ...]:
@@ -334,13 +360,22 @@ class HistoricalPortfolioSimulation:
             self.current_date, symbol, side, quantity, price, total
         )
         self._trades.append(trade)
-        self._candles[-1] = self._portfolio_candle(
-            self.current_date,
-            {
-                item: self._price_candles[item][-1]
-                for item in self.symbols
-            },
-        )
+        current_bars = {
+            item: self._price_candles[item][-1] for item in self.symbols
+        }
+        if all(bar.day == self.current_date for bar in current_bars.values()):
+            self._candles[-1] = self._portfolio_candle(
+                self.current_date, current_bars
+            )
+        else:
+            current_value = self.current_value
+            self._candles[-1] = PortfolioCandle(
+                self.current_date,
+                current_value,
+                current_value,
+                current_value,
+                current_value,
+            )
         return trade
 
     def _portfolio_candle(
@@ -363,12 +398,29 @@ class HistoricalPortfolioSimulation:
         )
 
     def advance(self) -> PortfolioCandle:
+        return self.advance_calendar_day()
+
+    def advance_calendar_day(self) -> PortfolioCandle:
         if self.is_complete:
             raise SimulationCompleteError(
-                "La simulación ya llegó a la última cotización disponible de 2023."
+                "La simulación ya llegó a su fecha final."
             )
 
+        next_date = self._current_date + timedelta(days=1)
         next_index = self._index + 1
+        self._calendar_mode = True
+        if (
+            next_index >= len(self._dates)
+            or self._dates[next_index] != next_date
+        ):
+            self._current_date = next_date
+            value = self.current_value
+            candle = PortfolioCandle(
+                next_date, value, value, value, value
+            )
+            self._candles.append(candle)
+            return candle
+
         next_prices: dict[str, float] = {}
         next_bars: dict[str, HistoricalBar] = {}
         for symbol in self.symbols:
@@ -402,6 +454,7 @@ class HistoricalPortfolioSimulation:
             next_prices[symbol] = close
 
         self._index = next_index
+        self._current_date = next_date
         self._current_prices = next_prices
         for symbol, bar in next_bars.items():
             self._price_candles[symbol].append(bar)
@@ -412,10 +465,13 @@ class HistoricalPortfolioSimulation:
     def export_state(self) -> dict[str, object]:
         return {
             "version": 1,
+            "calendar_mode": self._calendar_mode,
             "market": self.market,
             "symbols": list(self.symbols),
             "initial_cash": self.initial_cash,
             "start_date": self.start_date.isoformat(),
+            "end_date": self.end_date.isoformat(),
+            "current_date": self.current_date.isoformat(),
             "index": self._index,
             "cash_balance": self._cash_balance,
             "shares": self._shares,
@@ -478,6 +534,13 @@ class HistoricalPortfolioSimulation:
             raise ValueError("La versión de la sesión guardada no es compatible.")
         try:
             symbols = tuple(state["symbols"])
+            start_date = date.fromisoformat(state["start_date"])
+            end_date = (
+                date.fromisoformat(state["end_date"])
+                if state.get("end_date")
+                else None
+            )
+            calendar_mode = state.get("calendar_mode") is True
             history_data = state["history"]
             if not isinstance(history_data, Mapping):
                 raise TypeError
@@ -507,15 +570,28 @@ class HistoricalPortfolioSimulation:
                 history,
                 symbols,
                 float(state["initial_cash"]),
-                date.fromisoformat(state["start_date"]),
+                start_date,
+                end_date=end_date,
                 initial_holdings={symbol: 0 for symbol in symbols},
                 market=str(state["market"]),
             )
             simulation._shares = shares
             index = int(state["index"])
-            if not 0 <= index < len(simulation._dates):
+            if not simulation._start_index <= index < len(simulation._dates):
                 raise ValueError("La fecha guardada no pertenece a la serie.")
             simulation._index = index
+            simulation._current_date = (
+                date.fromisoformat(state["current_date"])
+                if state.get("current_date")
+                else simulation._dates[index]
+            )
+            if not (
+                simulation.start_date
+                <= simulation._current_date
+                <= simulation.end_date
+            ):
+                raise ValueError("La fecha guardada no pertenece a la sesión.")
+            simulation._calendar_mode = calendar_mode
             simulation._cash_balance = float(state["cash_balance"])
             raw_prices = state["current_prices"]
             if not isinstance(raw_prices, Mapping):
@@ -562,13 +638,39 @@ class HistoricalPortfolioSimulation:
             raise ValueError(
                 "La sesión guardada está incompleta o dañada."
             ) from exc
+        if not calendar_mode:
+            calendar_candles: list[PortfolioCandle] = []
+            for candle in simulation._candles:
+                if calendar_candles:
+                    fill_date = calendar_candles[-1].day + timedelta(days=1)
+                    while fill_date < candle.day:
+                        value = calendar_candles[-1].close
+                        calendar_candles.append(
+                            PortfolioCandle(
+                                fill_date, value, value, value, value
+                            )
+                        )
+                        fill_date += timedelta(days=1)
+                calendar_candles.append(candle)
+            simulation._candles = calendar_candles
+            simulation._calendar_mode = True
+
+        expected_candles = (
+            (simulation.current_date - simulation.start_date).days + 1
+        )
+        expected_price_candles = index - simulation._start_index + 1
         if (
-            len(simulation._candles) != index - next(
-                i for i, day in enumerate(simulation._dates)
-                if day == simulation.start_date
-            ) + 1
+            not simulation._candles
+            or len(simulation._candles) != expected_candles
+            or simulation._candles[0].day != simulation.start_date
+            or simulation._candles[-1].day != simulation.current_date
             or any(
-                len(simulation._price_candles[symbol]) != len(simulation._candles)
+                simulation._candles[position].day
+                != simulation._candles[position - 1].day + timedelta(days=1)
+                for position in range(1, len(simulation._candles))
+            )
+            or any(
+                len(simulation._price_candles[symbol]) != expected_price_candles
                 for symbol in symbols
             )
         ):
