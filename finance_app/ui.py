@@ -1,10 +1,16 @@
 import re
+import sqlite3
+from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QThread, Signal, Qt
+import matplotlib.dates as mdates
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
+from PySide6.QtCore import QDate, QThread, QTimer, Signal, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QHBoxLayout,
@@ -15,16 +21,48 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QDateEdit,
+    QGroupBox,
     QInputDialog,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from finance_app.historical_simulation import (
+    COMPANY_NAMES,
+    MARKET_SYMBOLS,
+    HistoricalBar,
+    HistoricalDataError,
+    HistoricalPortfolioSimulation,
+    SimulationCompleteError,
+    fetch_2023_history,
+)
+from finance_app.historical_sessions import (
+    HistoricalSessionError,
+    HistoricalSessionStore,
+)
 from finance_app.market_data import YFinanceMarketData
 from finance_app.models import StockSnapshot
 from finance_app.simulator import SimulationError, SimulationLedger
+
+
+class HistoricalDataWorker(QThread):
+    completed = Signal(object, str)
+
+    def __init__(self, symbols: list[str]) -> None:
+        super().__init__()
+        self.symbols = symbols
+
+    def run(self) -> None:
+        try:
+            history = fetch_2023_history(self.symbols)
+        except Exception as exc:
+            self.completed.emit(None, str(exc))
+            return
+        self.completed.emit(history, "")
 
 
 class AnalysisWorker(QThread):
@@ -50,6 +88,9 @@ class FinanceWindow(QMainWindow):
     def __init__(self, ledger: SimulationLedger) -> None:
         super().__init__()
         self.ledger = ledger
+        self.historical_session_store = HistoricalSessionStore(
+            ledger.database_path
+        )
         self.market_data = YFinanceMarketData()
         self.snapshots: dict[str, StockSnapshot] = {}
         self.selected_symbol: str | None = None
@@ -275,10 +316,745 @@ class FinanceWindow(QMainWindow):
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setWidget(root)
-        self.setCentralWidget(scroll_area)
+        tabs = QTabWidget()
+        tabs.addTab(scroll_area, "Portafolio y operaciones")
+        tabs.addTab(self._build_historical_tab(), "Simulación histórica 2023")
+        self.setCentralWidget(tabs)
         self._income_type_changed()
         self._asset_type_changed()
         self._refresh_portfolio()
+
+    def _build_historical_tab(self) -> QWidget:
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        description = QLabel(
+            "Precios históricos de 2023 con una ligera variación aleatoria. "
+            "Selecciona empresas para las tenencias iniciales; durante la sesión "
+            "podrás operar cualquiera de las empresas de ese mercado."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        controls = QHBoxLayout()
+        self.historical_market_input = QComboBox()
+        self.historical_market_input.addItem("NASDAQ", "NASDAQ")
+        self.historical_market_input.addItem("NYSE", "NYSE")
+        self.historical_market_input.currentIndexChanged.connect(
+            self._update_historical_market
+        )
+        self.historical_cash_input = QDoubleSpinBox()
+        self.historical_cash_input.setRange(1, 1_000_000_000_000)
+        self.historical_cash_input.setDecimals(2)
+        self.historical_cash_input.setValue(100_000)
+        self.historical_start_date_input = QDateEdit()
+        self.historical_start_date_input.setCalendarPopup(True)
+        self.historical_start_date_input.setDisplayFormat("yyyy-MM-dd")
+        self.historical_start_date_input.setDate(QDate(2023, 1, 3))
+        self.historical_start_date_input.setMinimumDate(QDate(2023, 1, 1))
+        self.historical_start_date_input.setMaximumDate(QDate(2023, 12, 28))
+        self.historical_start_button = QPushButton("Iniciar simulación")
+        self.historical_start_button.clicked.connect(
+            self._start_historical_simulation
+        )
+        controls.addWidget(QLabel("Mercado:"))
+        controls.addWidget(self.historical_market_input)
+        controls.addWidget(QLabel("Capital inicial (USD):"))
+        controls.addWidget(self.historical_cash_input)
+        controls.addWidget(QLabel("Fecha inicial:"))
+        controls.addWidget(self.historical_start_date_input)
+        controls.addWidget(self.historical_start_button)
+        setup_group = QGroupBox("1. Configuración de la sesión")
+        setup_group.setLayout(controls)
+        layout.addWidget(setup_group)
+
+        self.historical_checkboxes: dict[str, QCheckBox] = {}
+        company_controls = QHBoxLayout()
+        for symbol, company in COMPANY_NAMES.items():
+            checkbox = QCheckBox(f"{company} ({symbol})")
+            checkbox.setChecked(True)
+            self.historical_checkboxes[symbol] = checkbox
+            company_controls.addWidget(checkbox)
+        holdings_selection_group = QGroupBox(
+            "Tenencias iniciales aleatorias (0–50 acciones)"
+        )
+        holdings_selection_group.setLayout(company_controls)
+        layout.addWidget(holdings_selection_group)
+
+        simulation_controls = QHBoxLayout()
+        self.historical_chart_type_input = QComboBox()
+        self.historical_chart_type_input.addItem("Clásico (línea)", "line")
+        self.historical_chart_type_input.addItem("Velas", "candles")
+        self.historical_chart_type_input.currentIndexChanged.connect(
+            self._refresh_historical_chart
+        )
+        self.historical_next_button = QPushButton("Avanzar un día")
+        self.historical_next_button.setEnabled(False)
+        self.historical_next_button.clicked.connect(self._advance_historical_day)
+        simulation_controls.addWidget(QLabel("Gráfico:"))
+        simulation_controls.addWidget(self.historical_chart_type_input)
+        simulation_controls.addWidget(self.historical_next_button)
+        simulation_controls.addStretch(1)
+        clock_group = QGroupBox("2. Reproducción del mercado")
+        clock_group.setLayout(simulation_controls)
+        layout.addWidget(clock_group)
+
+        self.historical_summary_label = QLabel(
+            "Elige un mercado, las empresas y la fecha para iniciar."
+        )
+        self.historical_summary_label.setWordWrap(True)
+        self.historical_figure = Figure(figsize=(10, 5))
+        self.historical_canvas = FigureCanvasQTAgg(self.historical_figure)
+        chart_layout = QVBoxLayout()
+        chart_layout.addWidget(self.historical_summary_label)
+        chart_layout.addWidget(self.historical_canvas, 1)
+        chart_group = QGroupBox("3. Cotización de la empresa seleccionada")
+        chart_group.setLayout(chart_layout)
+        layout.addWidget(chart_group, 1)
+
+        portfolio_controls = QHBoxLayout()
+        self.historical_symbol_input = QComboBox()
+        self.historical_symbol_input.currentIndexChanged.connect(
+            self._historical_symbol_changed
+        )
+        self.historical_quantity_input = QSpinBox()
+        self.historical_quantity_input.setRange(1, 50)
+        self.historical_quantity_input.setValue(1)
+        self.historical_quantity_input.valueChanged.connect(
+            self._refresh_historical_trade_controls
+        )
+        self.historical_buy_button = QPushButton("Comprar")
+        self.historical_buy_button.clicked.connect(
+            lambda: self._trade_historical_asset("COMPRA")
+        )
+        self.historical_sell_button = QPushButton("Vender")
+        self.historical_sell_button.clicked.connect(
+            lambda: self._trade_historical_asset("VENTA")
+        )
+        self.historical_buy_button.setEnabled(False)
+        self.historical_sell_button.setEnabled(False)
+        portfolio_controls.addWidget(QLabel("Empresa:"))
+        portfolio_controls.addWidget(self.historical_symbol_input)
+        portfolio_controls.addWidget(QLabel("Cantidad (1–50):"))
+        portfolio_controls.addWidget(self.historical_quantity_input)
+        portfolio_controls.addWidget(self.historical_buy_button)
+        portfolio_controls.addWidget(self.historical_sell_button)
+        portfolio_controls.addStretch(1)
+        self.historical_trade_hint = QLabel(
+            "Inicia una sesión para consultar el precio y operar."
+        )
+
+        self.historical_holdings_table = QTableWidget(0, 4)
+        self.historical_holdings_table.setHorizontalHeaderLabels(
+            ["Empresa", "Acciones", "Precio (USD)", "Valor (USD)"]
+        )
+        self.historical_holdings_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.historical_holdings_table.horizontalHeader().setStretchLastSection(
+            True
+        )
+        trading_layout = QVBoxLayout()
+        trading_layout.addLayout(portfolio_controls)
+        trading_layout.addWidget(self.historical_trade_hint)
+        trading_layout.addWidget(self.historical_holdings_table)
+        trading_group = QGroupBox(
+            "4. Operar durante la sesión (todas las empresas del mercado)"
+        )
+        trading_group.setLayout(trading_layout)
+        layout.addWidget(trading_group)
+
+        session_controls = QHBoxLayout()
+        self.historical_session_input = QComboBox()
+        self.historical_save_session_button = QPushButton("Guardar sesión")
+        self.historical_save_session_button.clicked.connect(
+            self._save_historical_session
+        )
+        self.historical_load_session_button = QPushButton("Cargar sesión")
+        self.historical_load_session_button.clicked.connect(
+            self._load_historical_session
+        )
+        self.historical_save_session_button.setEnabled(False)
+        self.historical_load_session_button.setEnabled(False)
+        session_controls.addWidget(QLabel("Sesión guardada:"))
+        session_controls.addWidget(self.historical_session_input, 1)
+        session_controls.addWidget(self.historical_save_session_button)
+        session_controls.addWidget(self.historical_load_session_button)
+        sessions_group = QGroupBox("Guardar o recuperar una sesión")
+        sessions_group.setLayout(session_controls)
+        layout.addWidget(sessions_group)
+
+        self.historical_trade_log = QTableWidget(0, 5)
+        self.historical_trade_log.setHorizontalHeaderLabels(
+            ["Fecha", "Empresa", "Operación", "Cantidad", "Precio (USD)"]
+        )
+        self.historical_trade_log.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.historical_trade_log.horizontalHeader().setStretchLastSection(True)
+        trade_log_layout = QVBoxLayout()
+        trade_log_layout.addWidget(self.historical_trade_log)
+        trade_log_group = QGroupBox("Historial de operaciones")
+        trade_log_group.setLayout(trade_log_layout)
+        layout.addWidget(trade_log_group)
+        self.historical_holdings_table.setEnabled(False)
+
+        self.historical_simulation: HistoricalPortfolioSimulation | None = None
+        self.historical_worker: HistoricalDataWorker | None = None
+        self._historical_pending_symbols: list[str] = []
+        self._historical_pending_initial_symbols: list[str] = []
+        self._historical_pending_cash = 0.0
+        self._historical_pending_date = date(2023, 1, 3)
+        self._historical_pending_market = "NASDAQ"
+        self.historical_timer = QTimer(self)
+        self.historical_timer.timeout.connect(self._advance_historical_day)
+        self.historical_speed_input = QSpinBox()
+        self.historical_speed_input.setRange(1, 60)
+        self.historical_speed_input.setValue(2)
+        self.historical_speed_input.setSuffix(" s / día")
+        self.historical_speed_input.valueChanged.connect(
+            self._set_historical_timer_interval
+        )
+        simulation_controls.insertWidget(2, QLabel("Velocidad:"))
+        simulation_controls.insertWidget(3, self.historical_speed_input)
+        self.historical_next_button.setText("Avanzar un día")
+        self.historical_next_button.setEnabled(False)
+        self.historical_clock_button = QPushButton("Iniciar reloj")
+        self.historical_clock_button.setEnabled(False)
+        self.historical_clock_button.clicked.connect(self._toggle_historical_clock)
+        simulation_controls.addWidget(self.historical_clock_button)
+        self._update_historical_market()
+        self._refresh_historical_chart()
+        self._refresh_saved_sessions()
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(content)
+        return scroll_area
+
+    def _update_historical_market(self) -> None:
+        market = self.historical_market_input.currentData()
+        for symbol, checkbox in self.historical_checkboxes.items():
+            available = symbol in MARKET_SYMBOLS[market]
+            checkbox.setVisible(available)
+            checkbox.setChecked(available)
+        previous_symbol = self.historical_symbol_input.currentData()
+        self.historical_symbol_input.clear()
+        for symbol in MARKET_SYMBOLS[market]:
+            self.historical_symbol_input.addItem(
+                f"{COMPANY_NAMES[symbol]} ({symbol})", symbol
+            )
+        if previous_symbol in MARKET_SYMBOLS[market]:
+            self.historical_symbol_input.setCurrentIndex(
+                self.historical_symbol_input.findData(previous_symbol)
+            )
+
+    def _start_historical_simulation(self) -> None:
+        if (
+            self.historical_simulation is not None
+            and self.historical_start_button.text() == "Nueva simulación"
+        ):
+            answer = QMessageBox.question(
+                self,
+                "Iniciar otra simulación",
+                "La simulación actual se cerrará. Guárdala antes si quieres "
+                "poder retomarla luego. ¿Continuar?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self.historical_timer.stop()
+            self.historical_simulation = None
+            self.historical_holdings_table.setRowCount(0)
+            self.historical_trade_log.setRowCount(0)
+            self.historical_market_input.setEnabled(True)
+            self.historical_cash_input.setEnabled(True)
+            self.historical_start_date_input.setEnabled(True)
+            market = self.historical_market_input.currentData()
+            for symbol, checkbox in self.historical_checkboxes.items():
+                checkbox.setEnabled(symbol in MARKET_SYMBOLS[market])
+            self.historical_start_button.setText("Iniciar simulación")
+            self.historical_next_button.setEnabled(False)
+            self.historical_clock_button.setEnabled(False)
+            self.historical_buy_button.setEnabled(False)
+            self.historical_sell_button.setEnabled(False)
+            self.historical_save_session_button.setEnabled(False)
+            self._refresh_historical_chart()
+
+        self.historical_timer.stop()
+        market = self.historical_market_input.currentData()
+        initial_symbols = [
+            symbol
+            for symbol in MARKET_SYMBOLS[market]
+            if self.historical_checkboxes[symbol].isChecked()
+        ]
+        if not initial_symbols:
+            QMessageBox.warning(
+                self,
+                "Sin tenencias iniciales",
+                "Selecciona al menos una empresa para asignarle acciones "
+                "iniciales aleatorias.",
+            )
+            return
+
+        symbols = list(MARKET_SYMBOLS[market])
+        self._historical_pending_symbols = symbols
+        self._historical_pending_initial_symbols = initial_symbols
+        self._historical_pending_cash = self.historical_cash_input.value()
+        self._historical_pending_date = date.fromisoformat(
+            self.historical_start_date_input.date().toString("yyyy-MM-dd")
+        )
+        self._historical_pending_market = market
+        self.historical_market_input.setEnabled(False)
+        self.historical_cash_input.setEnabled(False)
+        self.historical_start_date_input.setEnabled(False)
+        for checkbox in self.historical_checkboxes.values():
+            checkbox.setEnabled(False)
+        self.historical_start_button.setEnabled(False)
+        self.historical_start_button.setText("Descargando datos 2023...")
+        self.historical_worker = HistoricalDataWorker(symbols)
+        self.historical_worker.completed.connect(self._historical_data_loaded)
+        self.historical_worker.finished.connect(
+            self._historical_download_finished
+        )
+        self.historical_worker.start()
+
+    def _historical_download_finished(self) -> None:
+        self.historical_start_button.setEnabled(True)
+        if self.historical_simulation is None:
+            self.historical_start_button.setText("Iniciar simulación")
+            self.historical_market_input.setEnabled(True)
+            self.historical_cash_input.setEnabled(True)
+            self.historical_start_date_input.setEnabled(True)
+            market = self.historical_market_input.currentData()
+            for symbol, checkbox in self.historical_checkboxes.items():
+                checkbox.setEnabled(symbol in MARKET_SYMBOLS[market])
+        else:
+            self.historical_start_button.setText("Nueva simulación")
+
+    def _historical_data_loaded(
+        self,
+        history: dict[str, tuple[HistoricalBar, ...]] | None,
+        error: str,
+    ) -> None:
+        if error:
+            QMessageBox.warning(self, "Datos históricos no disponibles", error)
+            return
+        if history is None:
+            QMessageBox.warning(
+                self,
+                "Datos históricos no disponibles",
+                "La fuente no devolvió datos históricos utilizables.",
+            )
+            return
+        try:
+            self.historical_simulation = HistoricalPortfolioSimulation(
+                history,
+                self._historical_pending_symbols,
+                self._historical_pending_cash,
+                self._historical_pending_date,
+                initial_random_symbols=self._historical_pending_initial_symbols,
+                market=self._historical_pending_market,
+            )
+        except (HistoricalDataError, ValueError) as exc:
+            QMessageBox.warning(self, "Simulación no iniciada", str(exc))
+            return
+        self.historical_next_button.setEnabled(True)
+        self.historical_clock_button.setEnabled(True)
+        self.historical_clock_button.setText("Pausar reloj")
+        self.historical_timer.start(self.historical_speed_input.value() * 1000)
+        self.historical_symbol_input.setCurrentIndex(
+            self.historical_symbol_input.findData(
+                self.historical_simulation.symbols[0]
+            )
+        )
+        self.historical_buy_button.setEnabled(True)
+        self.historical_sell_button.setEnabled(True)
+        self.historical_save_session_button.setEnabled(True)
+        self.historical_holdings_table.setEnabled(True)
+        self.historical_market_input.setEnabled(False)
+        self.historical_cash_input.setEnabled(False)
+        self.historical_start_date_input.setEnabled(False)
+        for checkbox in self.historical_checkboxes.values():
+            checkbox.setEnabled(False)
+        self._refresh_historical_holdings()
+        self._refresh_historical_trade_log()
+        self._refresh_historical_summary()
+        self._refresh_historical_chart()
+
+    def _advance_historical_day(self) -> None:
+        if self.historical_simulation is None:
+            return
+        try:
+            self.historical_simulation.advance()
+        except SimulationCompleteError:
+            self.historical_timer.stop()
+            self.historical_clock_button.setText("Iniciar reloj")
+            self.historical_next_button.setEnabled(False)
+            self.historical_clock_button.setEnabled(False)
+            return
+        self._refresh_historical_holdings()
+        self._refresh_historical_summary()
+        self._refresh_historical_chart()
+        if self.historical_simulation.is_complete:
+            self.historical_timer.stop()
+            self.historical_next_button.setEnabled(False)
+            self.historical_clock_button.setEnabled(False)
+            self.historical_clock_button.setText("Finalizada")
+            self.historical_buy_button.setEnabled(False)
+            self.historical_sell_button.setEnabled(False)
+
+    def _set_historical_timer_interval(self, seconds: int) -> None:
+        self.historical_timer.setInterval(seconds * 1000)
+
+    def _toggle_historical_clock(self) -> None:
+        simulation = self.historical_simulation
+        if simulation is None or simulation.is_complete:
+            return
+        if self.historical_timer.isActive():
+            self.historical_timer.stop()
+            self.historical_clock_button.setText("Reanudar reloj")
+        else:
+            self.historical_timer.start(
+                self.historical_speed_input.value() * 1000
+            )
+            self.historical_clock_button.setText("Pausar reloj")
+
+    def _trade_historical_asset(self, side: str) -> None:
+        simulation = self.historical_simulation
+        if simulation is None:
+            return
+        try:
+            trade = simulation.trade(
+                self.historical_symbol_input.currentData(),
+                side,
+                self.historical_quantity_input.value(),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Operación no realizada", str(exc))
+            return
+        self._refresh_historical_holdings()
+        self._refresh_historical_trade_log()
+        self._refresh_historical_summary()
+        self._refresh_historical_chart()
+        self.statusBar().showMessage(
+            f"{trade.side} simulada: {trade.quantity} {trade.symbol} "
+            f"a USD {trade.unit_price:,.2f}.",
+            5000,
+        )
+
+    def _refresh_historical_holdings(self) -> None:
+        simulation = self.historical_simulation
+        if simulation is None:
+            self.historical_holdings_table.setRowCount(0)
+            self._refresh_historical_trade_controls()
+            return
+        self.historical_holdings_table.setRowCount(len(simulation.symbols))
+        for row, symbol in enumerate(simulation.symbols):
+            quantity = simulation.holdings[symbol]
+            price = simulation.prices[symbol]
+            values = (
+                f"{COMPANY_NAMES[symbol]} ({symbol})",
+                str(quantity),
+                f"{price:,.2f}",
+                f"{quantity * price:,.2f}",
+            )
+            for column, value in enumerate(values):
+                self.historical_holdings_table.setItem(
+                    row, column, QTableWidgetItem(value)
+                )
+        self.historical_holdings_table.resizeColumnsToContents()
+        self._refresh_historical_trade_controls()
+
+    def _historical_symbol_changed(self) -> None:
+        self._refresh_historical_chart()
+        self._refresh_historical_trade_controls()
+
+    def _refresh_historical_trade_controls(self) -> None:
+        simulation = self.historical_simulation
+        symbol = self.historical_symbol_input.currentData()
+        if simulation is None or symbol not in simulation.symbols:
+            self.historical_buy_button.setEnabled(False)
+            self.historical_sell_button.setEnabled(False)
+            self.historical_trade_hint.setText(
+                "Inicia una sesión para consultar el precio y operar."
+            )
+            return
+
+        quantity = self.historical_quantity_input.value()
+        price = simulation.prices[symbol]
+        position = simulation.holdings[symbol]
+        total = price * quantity
+        is_active = not simulation.is_complete
+        can_buy = is_active and total <= simulation.cash_balance
+        can_sell = is_active and quantity <= position
+        self.historical_buy_button.setEnabled(can_buy)
+        self.historical_sell_button.setEnabled(can_sell)
+        self.historical_trade_hint.setText(
+            f"{COMPANY_NAMES[symbol]} ({symbol}) · "
+            f"Precio USD {price:,.2f} · "
+            f"Total estimado ({quantity}): USD {total:,.2f} · "
+            f"Acciones disponibles: {position} · "
+            f"Efectivo: USD {simulation.cash_balance:,.2f}"
+        )
+
+    def _refresh_historical_trade_log(self) -> None:
+        trades = (
+            self.historical_simulation.trades
+            if self.historical_simulation is not None
+            else ()
+        )
+        self.historical_trade_log.setRowCount(len(trades))
+        for row, trade in enumerate(reversed(trades)):
+            values = (
+                trade.day.isoformat(),
+                trade.symbol,
+                trade.side,
+                str(trade.quantity),
+                f"{trade.unit_price:,.2f}",
+            )
+            for column, value in enumerate(values):
+                self.historical_trade_log.setItem(
+                    row, column, QTableWidgetItem(value)
+                )
+        self.historical_trade_log.resizeColumnsToContents()
+
+    def _refresh_saved_sessions(self) -> None:
+        self.historical_session_input.clear()
+        try:
+            sessions = self.historical_session_store.list_sessions()
+        except (OSError, sqlite3.Error) as exc:
+            QMessageBox.warning(
+                self, "Sesiones no disponibles", f"No se pudieron leer: {exc}"
+            )
+            return
+        for name, updated_at in sessions:
+            self.historical_session_input.addItem(
+                f"{name} — {updated_at}", name
+            )
+        self.historical_load_session_button.setEnabled(bool(sessions))
+
+    def _save_historical_session(self) -> None:
+        simulation = self.historical_simulation
+        if simulation is None:
+            return
+        name, accepted = QInputDialog.getText(
+            self, "Guardar sesión", "Nombre para esta sesión:"
+        )
+        if not accepted:
+            return
+        session_name = name.strip()
+        try:
+            existing_sessions = self.historical_session_store.list_sessions()
+        except sqlite3.Error as exc:
+            QMessageBox.warning(
+                self, "Sesión no guardada", f"No se pudieron leer sesiones: {exc}"
+            )
+            return
+        if any(saved_name == session_name for saved_name, _ in existing_sessions):
+            answer = QMessageBox.question(
+                self,
+                "Sobrescribir sesión",
+                f"«{session_name}» ya existe. ¿Quieres reemplazarla?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        state = simulation.export_state()
+        state["chart_type"] = self.historical_chart_type_input.currentData()
+        state["timer_interval_seconds"] = self.historical_speed_input.value()
+        state["initial_random_symbols"] = self._historical_pending_initial_symbols
+        try:
+            self.historical_session_store.save(session_name, state)
+        except (HistoricalSessionError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Sesión no guardada", str(exc))
+            return
+        self._refresh_saved_sessions()
+        saved_index = self.historical_session_input.findData(session_name)
+        if saved_index >= 0:
+            self.historical_session_input.setCurrentIndex(saved_index)
+        QMessageBox.information(
+            self, "Sesión guardada", f"Sesión «{session_name}» guardada."
+        )
+
+    def _load_historical_session(self) -> None:
+        name = self.historical_session_input.currentData()
+        if not name:
+            return
+        self.historical_timer.stop()
+        try:
+            state = self.historical_session_store.load(name)
+            simulation = HistoricalPortfolioSimulation.from_state(state)
+        except (HistoricalSessionError, sqlite3.Error, ValueError) as exc:
+            QMessageBox.warning(self, "Sesión no cargada", str(exc))
+            return
+
+        market = simulation.market
+        if market not in MARKET_SYMBOLS or any(
+            symbol not in MARKET_SYMBOLS[market] for symbol in simulation.symbols
+        ):
+            QMessageBox.warning(
+                self, "Sesión no cargada", "El mercado guardado no es válido."
+            )
+            return
+        raw_initial_symbols = state.get(
+            "initial_random_symbols", list(simulation.symbols)
+        )
+        if (
+            not isinstance(raw_initial_symbols, list)
+            or any(
+                not isinstance(symbol, str)
+                or symbol not in simulation.symbols
+                for symbol in raw_initial_symbols
+            )
+        ):
+            QMessageBox.warning(
+                self, "Sesión no cargada", "Las empresas iniciales no son válidas."
+            )
+            return
+        self.historical_simulation = simulation
+        self.historical_market_input.setCurrentIndex(
+            self.historical_market_input.findData(market)
+        )
+        for symbol, checkbox in self.historical_checkboxes.items():
+            checkbox.setChecked(symbol in raw_initial_symbols)
+        self._historical_pending_market = market
+        self._historical_pending_symbols = list(simulation.symbols)
+        self._historical_pending_initial_symbols = raw_initial_symbols
+        self._historical_pending_cash = simulation.initial_cash
+        self._historical_pending_date = simulation.start_date
+        self.historical_start_button.setText("Nueva simulación")
+        self.historical_market_input.setEnabled(False)
+        self.historical_cash_input.setEnabled(False)
+        self.historical_start_date_input.setEnabled(False)
+        for checkbox in self.historical_checkboxes.values():
+            checkbox.setEnabled(False)
+        chart_type = state.get("chart_type", "line")
+        if chart_type in {"line", "candles"}:
+            self.historical_chart_type_input.setCurrentIndex(
+                self.historical_chart_type_input.findData(chart_type)
+            )
+        try:
+            interval = int(state.get("timer_interval_seconds", 2))
+        except (TypeError, ValueError):
+            interval = 2
+        if 1 <= interval <= 60:
+            self.historical_speed_input.setValue(interval)
+        self.historical_symbol_input.setCurrentIndex(
+            self.historical_symbol_input.findData(simulation.symbols[0])
+        )
+        self.historical_next_button.setEnabled(not simulation.is_complete)
+        self.historical_clock_button.setEnabled(not simulation.is_complete)
+        self.historical_clock_button.setText(
+            "Pausar reloj" if not simulation.is_complete else "Finalizada"
+        )
+        self.historical_buy_button.setEnabled(not simulation.is_complete)
+        self.historical_sell_button.setEnabled(not simulation.is_complete)
+        self.historical_save_session_button.setEnabled(True)
+        self.historical_holdings_table.setEnabled(True)
+        self._refresh_historical_holdings()
+        self._refresh_historical_trade_log()
+        self._refresh_historical_summary()
+        self._refresh_historical_chart()
+        if not simulation.is_complete:
+            self.historical_timer.start(
+                self.historical_speed_input.value() * 1000
+            )
+
+    def _refresh_historical_summary(self) -> None:
+        simulation = self.historical_simulation
+        if simulation is None:
+            self.historical_summary_label.setText(
+                "Elige un mercado, las empresas y la fecha para iniciar."
+            )
+            return
+        holdings_text = ", ".join(
+            f"{symbol} {simulation.holdings[symbol]}"
+            for symbol in simulation.symbols
+        )
+        self.historical_summary_label.setText(
+            f"Mercado: {self._historical_pending_market} · "
+            f"Empresas: {', '.join(simulation.symbols)} · "
+            f"Capital disponible: USD {simulation.cash_balance:,.2f} · "
+            f"Tenencias: {holdings_text} · "
+            f"Fecha: {simulation.current_date.isoformat()} · "
+            f"Valor: USD {simulation.current_value:,.2f} · "
+            f"Rentabilidad: {simulation.return_pct:+.2f}%"
+        )
+
+    def _refresh_historical_chart(self) -> None:
+        self.historical_figure.clear()
+        axes = self.historical_figure.add_subplot(111)
+        simulation = self.historical_simulation
+        if simulation is None:
+            axes.text(
+                0.5,
+                0.5,
+                "La serie histórica aparecerá al iniciar la simulación.",
+                ha="center",
+                va="center",
+                transform=axes.transAxes,
+            )
+            axes.set_axis_off()
+        else:
+            symbol = self.historical_symbol_input.currentData()
+            candles = simulation.price_candles(symbol)
+            dates = [mdates.date2num(item.day) for item in candles]
+            holding = simulation.holdings[symbol]
+            if self.historical_chart_type_input.currentData() == "line":
+                axes.plot(
+                    dates,
+                    [item.close for item in candles],
+                    color="#2563eb",
+                    linewidth=1.8,
+                )
+                axes.set_title(
+                    f"{COMPANY_NAMES[symbol]} ({symbol}) · {holding} acciones"
+                )
+            else:
+                body_width = 0.65
+                for x, item in zip(dates, candles):
+                    rising = item.close >= item.open
+                    color = "#16a34a" if rising else "#dc2626"
+                    axes.vlines(x, item.low, item.high, color=color, linewidth=1)
+                    body_height = max(
+                        abs(item.close - item.open),
+                        max(item.close, item.open) * 0.00001,
+                    )
+                    axes.bar(
+                        x,
+                        body_height,
+                        bottom=min(item.open, item.close),
+                        width=body_width,
+                        color=color,
+                        edgecolor=color,
+                        linewidth=0.8,
+                    )
+                axes.set_title(
+                    f"Velas OHLC · {COMPANY_NAMES[symbol]} "
+                    f"({symbol}) · {holding} acciones"
+                )
+            symbol_trades = [
+                trade for trade in simulation.trades if trade.symbol == symbol
+            ]
+            for side, marker, color in (
+                ("COMPRA", "^", "#16a34a"),
+                ("VENTA", "v", "#dc2626"),
+            ):
+                operations = [trade for trade in symbol_trades if trade.side == side]
+                if operations:
+                    axes.scatter(
+                        [mdates.date2num(trade.day) for trade in operations],
+                        [trade.unit_price for trade in operations],
+                        marker=marker,
+                        color=color,
+                        label=side.title(),
+                        zorder=3,
+                    )
+                    axes.legend()
+            axes.xaxis_date()
+            axes.xaxis.set_major_formatter(mdates.DateFormatter("%d-%b"))
+            axes.grid(True, alpha=0.25)
+            axes.set_ylabel("Precio por acción (USD)")
+            self.historical_figure.autofmt_xdate()
+        self.historical_figure.tight_layout()
+        self.historical_canvas.draw()
 
     def analyze(self) -> None:
         raw_symbols = [
