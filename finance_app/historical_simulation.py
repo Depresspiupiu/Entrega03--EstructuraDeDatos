@@ -225,6 +225,18 @@ class HistoricalPortfolioSimulation:
             self._shares[symbol] * self._current_prices[symbol]
             for symbol in selected
         )
+        if random_initial_holdings or initial_random_symbols is not None:
+            while invested > initial_cash:
+                holdings_with_shares = [
+                    symbol for symbol in selected if self._shares[symbol] >= 1
+                ]
+                if not holdings_with_shares:
+                    raise ValueError(
+                        "El capital inicial no alcanza para las tenencias."
+                    )
+                symbol = self._random.choice(holdings_with_shares)
+                self._shares[symbol] -= 1
+                invested -= self._current_prices[symbol]
         if invested > initial_cash:
             raise ValueError(
                 "Las tenencias iniciales superan el capital disponible."

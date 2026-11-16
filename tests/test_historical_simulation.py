@@ -141,6 +141,26 @@ class HistoricalPortfolioSimulationTests(unittest.TestCase):
         self.assertEqual(simulation.holdings["PEP"], 3)
         self.assertEqual(simulation.trades, (purchase,))
 
+    def test_random_holdings_fit_within_smaller_starting_capital(self) -> None:
+        simulation = HistoricalPortfolioSimulation(
+            self.history,
+            ("AAPL", "PEP"),
+            1_000,
+            date(2023, 1, 3),
+            seed=13,
+            random_initial_holdings=True,
+        )
+
+        self.assertGreaterEqual(simulation.cash_balance, 0)
+        self.assertLessEqual(
+            sum(
+                simulation.holdings[symbol] * simulation.prices[symbol]
+                for symbol in simulation.symbols
+            ),
+            1_000,
+        )
+        self.assertAlmostEqual(simulation.current_value, 1_000)
+
     def test_trade_rejects_insufficient_cash_and_unowned_shares(self) -> None:
         simulation = HistoricalPortfolioSimulation(
             self.history,

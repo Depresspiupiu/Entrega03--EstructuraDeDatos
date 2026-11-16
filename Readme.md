@@ -29,32 +29,57 @@ La plataforma permite comparar acciones analizando precios históricos desde Yah
 
 ## 🚀 Instalación y Ejecución
 
-### 1. Clonar el repositorio e instalar dependencias
+### Opción ligera: ejecutar con Python instalado
+
+Para evitar empaquetar Qt y las bibliotecas científicas dentro de un ejecutable de más de 90 MB, puedes descargar el paquete de código ligero, instalar sus dependencias una sola vez y abrir `run_finsim.bat`.
+
+El paquete incluye solamente el código y ocupa menos de 25 MB; Python y sus dependencias se instalan por separado y ocupan espacio adicional en el equipo.
+
+```powershell
+python -m pip install -r requirements-runtime.txt
+.\run_finsim.bat
+```
+
+### Opción para desarrollo: instalar todas las dependencias
+
+La lista completa incluye herramientas opcionales de análisis y empaquetado.
 
 ```powershell
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-### 2. Ejecutar la aplicación
+### Ejecutar la aplicación desde el código fuente
 
 ```powershell
 python main.py
 ```
 
-### 3. Crear ejecutable (.exe) para Windows
+### Crear ejecutable autónomo (.exe) para Windows
 
 ```powershell
 pyinstaller --noconfirm --clean --onefile --windowed --name FinSim --collect-all yfinance --collect-all curl_cffi --collect-data matplotlib main.py
 ```
 
-El ejecutable resultante se guardará en la carpeta `dist\FinSim.exe`.
+El ejecutable autónomo se guarda en `dist\FinSim.exe`; incluye el intérprete y las bibliotecas gráficas, por lo que supera los 25 MB.
+
+### Distribución portátil con dependencias en una carpeta
+
+La opción recomendada para copiar la aplicación a otro equipo Windows es crear una carpeta con el ejecutable y todas sus bibliotecas incluidas:
+
+```powershell
+pyinstaller --noconfirm --clean --onedir --windowed --name FinSimPortable --collect-all yfinance --collect-all curl_cffi --collect-data matplotlib main.py
+```
+
+La salida queda en `dist\FinSimPortable\`. Ejecuta `FinSimPortable.exe` o `run.bat` desde esa carpeta y conserva la subcarpeta `_internal` junto al ejecutable. No requiere Python ni instalar las bibliotecas en el equipo de destino. El tamaño total de la carpeta es mayor de 25 MB porque contiene el intérprete, Qt y Matplotlib.
 
 ## Simulación histórica 2023
 
 En la pestaña **Simulación histórica 2023** se puede elegir NASDAQ o NYSE, seleccionar empresas para las tenencias iniciales, fijar un capital inicial (USD 100.000 por defecto) y elegir una fecha de inicio. Al iniciar, cada empresa seleccionada recibe entre 0 y 50 acciones aleatorias y el saldo restante queda en efectivo. Los precios se descargan para todas las empresas del mercado elegido, así que también puedes comprar cualquiera de las otras empresas del mismo mercado aunque no tenga tenencias iniciales. Puedes escoger una empresa y comprar o vender entre 1 y 50 acciones; las compras validan el saldo y las ventas las acciones disponibles.
 
 El mercado avanza automáticamente según las cotizaciones históricas de 2023; se puede pausar, reanudar, ajustar el intervalo o avanzar manualmente. El gráfico lineal o de velas muestra la empresa seleccionada y marca las compras y ventas. Las sesiones pueden guardarse con nombre y cargarse después; el archivo local SQLite conserva también los datos históricos de la sesión, que puede reanudarse sin volver a descargarlos.
+
+La pantalla está organizada por secciones de configuración, reproducción, gráfico, operaciones e historial. Al elegir una empresa y cantidad muestra el precio y costo estimado; los botones de compra y venta se habilitan según el efectivo y las acciones disponibles.
 
 Empresas incluidas: Apple (AAPL), PepsiCo (PEP) y Nvidia (NVDA) en NASDAQ; Nike (NKE), Coca-Cola (KO) y TSMC (TSM, ADR) en NYSE. Se requiere Internet al iniciar una simulación nueva para consultar Yahoo Finance. La simulación es educativa y no representa órdenes ni recomendaciones de inversión.
 
