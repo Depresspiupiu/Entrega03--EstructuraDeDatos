@@ -1,0 +1,29 @@
+{
+  "format": 1,
+  "build_id": "8016e2b87e9913c48b0fd9c89f362146a34471d78a92de8bc4bd4d790ae3b9d8",
+  "app_folder": "FinSimPortable",
+  "executable": "FinSimPortable.exe",
+  "maximum_part_bytes": 24000000,
+  "parts": [
+    {
+      "name": "FinSim-Parte-01.zip",
+      "size": 23179539,
+      "sha256": "58827540615a8cc1fd07c2ca4f378a2a35fe2cedf62eab07615de25e11e566eb"
+    },
+    {
+      "name": "FinSim-Parte-02.zip",
+      "size": 22576288,
+      "sha256": "de151b20bad5653374ec0a4183ffa603a77f2f14382926b29095926531c0013b"
+    },
+    {
+      "name": "FinSim-Parte-03.zip",
+      "size": 22619858,
+      "sha256": "305454ace15b746a88c419e56eed2e32e147895502d162a8a3b738cd18b2a937"
+    },
+    {
+      "name": "FinSim-Parte-04.zip",
+      "size": 7367220,
+      "sha256": "600b96a656aaad7d0a1e7c5b2ded7db844340e04cd20f350991ab63ed80beda5"
+    }
+  ]
+}
