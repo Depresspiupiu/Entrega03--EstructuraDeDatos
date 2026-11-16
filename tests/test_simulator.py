@@ -103,6 +103,11 @@ class SimulationLedgerTests(unittest.TestCase):
         self.assertEqual(summary.cumulative_return_pct, Decimal("4.400"))
         self.assertEqual(summary.positions[0].unit_price, Decimal("120"))
         self.assertEqual(summary.positions[0].market_value, Decimal("240"))
+        self.assertEqual(summary.positions[0].unrealized_profit, Decimal("35"))
+        self.assertEqual(
+            summary.positions[0].unrealized_return_pct,
+            Decimal("35") / Decimal("205") * 100,
+        )
 
     def test_fixed_income_terms_accrue_value_until_maturity(self) -> None:
         self.ledger.set_initial_cash("COP", "1000")

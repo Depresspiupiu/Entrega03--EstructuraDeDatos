@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 
 from finance_app.historical_simulation import (
+    AcceleratedSimulationClock,
     HistoricalBar,
     HistoricalDataError,
     HistoricalPortfolioSimulation,
@@ -64,6 +65,56 @@ class HistoricalPortfolioSimulationTests(unittest.TestCase):
         self.assertTrue(simulation.is_complete)
         with self.assertRaises(SimulationCompleteError):
             simulation.advance()
+
+    def test_calendar_advances_from_january_first_and_carries_closed_day_prices(self) -> None:
+        simulation = HistoricalPortfolioSimulation(
+            self.history,
+            ("AAPL", "PEP"),
+            100_000,
+            date(2023, 1, 1),
+            end_date=date(2023, 1, 7),
+            seed=7,
+        )
+        initial_value = simulation.current_value
+
+        self.assertEqual(simulation.current_date, date(2023, 1, 1))
+        self.assertEqual(simulation.candles[0].day, date(2023, 1, 1))
+
+        for expected_day in (date(2023, 1, 2), date(2023, 1, 3)):
+            candle = simulation.advance_calendar_day()
+            self.assertEqual(candle.day, expected_day)
+            self.assertEqual(candle.close, initial_value)
+            self.assertEqual(len(simulation.price_candles("AAPL")), 1)
+
+        simulation.advance_calendar_day()
+        self.assertEqual(simulation.current_date, date(2023, 1, 4))
+        self.assertEqual(len(simulation.price_candles("AAPL")), 2)
+
+        restored = HistoricalPortfolioSimulation.from_state(
+            json.loads(json.dumps(simulation.export_state()))
+        )
+        self.assertEqual(restored.current_date, date(2023, 1, 4))
+        self.assertEqual(restored.candles, simulation.candles)
+        self.assertEqual(
+            restored.advance_calendar_day(), simulation.advance_calendar_day()
+        )
+        for expected_day in (date(2023, 1, 6), date(2023, 1, 7)):
+            candle = simulation.advance_calendar_day()
+            self.assertEqual(candle.day, expected_day)
+            self.assertEqual(candle.close, simulation.candles[-2].close)
+        self.assertTrue(simulation.is_complete)
+
+    def test_accelerated_clock_advances_a_day_after_24_simulated_hours(self) -> None:
+        clock = AcceleratedSimulationClock(date(2023, 1, 1))
+
+        for expected_hour in range(1, 24):
+            current_date, hour = clock.advance_hour()
+            self.assertEqual(current_date, date(2023, 1, 1))
+            self.assertEqual(hour, expected_hour)
+
+        self.assertEqual(
+            clock.advance_hour(), (date(2023, 1, 2), 0)
+        )
 
     def test_requires_common_dates_and_a_remaining_trading_day(self) -> None:
         misaligned = {
@@ -129,17 +180,33 @@ class HistoricalPortfolioSimulationTests(unittest.TestCase):
             self.history,
             ("AAPL", "PEP"),
             100_000,
-            date(2023, 1, 3),
+            date(2023, 1, 1),
+            end_date=date(2023, 1, 5),
             seed=13,
             initial_random_symbols=("AAPL",),
         )
 
         self.assertEqual(simulation.holdings["PEP"], 0)
+        initial_cash = simulation.cash_balance
         purchase = simulation.trade("PEP", "COMPRA", 3)
 
         self.assertEqual(purchase.symbol, "PEP")
+        self.assertEqual(purchase.day, date(2023, 1, 1))
         self.assertEqual(simulation.holdings["PEP"], 3)
         self.assertEqual(simulation.trades, (purchase,))
+        self.assertEqual(
+            simulation.candles[-1].open,
+            simulation.candles[-1].close,
+        )
+
+        sale = simulation.trade("PEP", "VENTA", 1)
+
+        self.assertEqual(sale.quantity, 1)
+        self.assertEqual(simulation.holdings["PEP"], 2)
+        self.assertEqual(
+            simulation.cash_balance,
+            initial_cash - purchase.total + sale.total,
+        )
 
     def test_random_holdings_fit_within_smaller_starting_capital(self) -> None:
         simulation = HistoricalPortfolioSimulation(
@@ -204,6 +271,24 @@ class HistoricalPortfolioSimulationTests(unittest.TestCase):
         next_restored = restored.advance()
         self.assertEqual(next_restored, next_original)
         self.assertEqual(restored.prices, simulation.prices)
+
+    def test_restores_sessions_without_calendar_clock_fields(self) -> None:
+        simulation = HistoricalPortfolioSimulation(
+            self.history,
+            ("AAPL",),
+            100_000,
+            date(2023, 1, 3),
+            seed=5,
+        )
+        simulation.advance()
+        legacy_state = simulation.export_state()
+        for key in ("calendar_mode", "current_date", "end_date"):
+            legacy_state.pop(key)
+
+        restored = HistoricalPortfolioSimulation.from_state(legacy_state)
+
+        self.assertEqual(restored.current_date, date(2023, 1, 4))
+        self.assertEqual(restored.candles, simulation.candles)
 
 
 class HistoricalSessionStoreTests(unittest.TestCase):
