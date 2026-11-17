@@ -1,5 +1,0 @@
-# Dependencies imported directly by the desktop application.
-# yfinance installs its runtime dependencies, including pandas and NumPy.
-PySide6>=6.8
-matplotlib>=3.9
-yfinance>=0.2.65
