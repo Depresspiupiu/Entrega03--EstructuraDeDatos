@@ -1,1 +1,0 @@
-"""Simulated stock analysis application."""
