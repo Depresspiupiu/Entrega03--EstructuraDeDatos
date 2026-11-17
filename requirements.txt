@@ -1,5 +1,0 @@
-# Runtime dependencies for the focused desktop application.
--r requirements-runtime.txt
-
-# Windows executable packaging.
-pyinstaller>=6.10
