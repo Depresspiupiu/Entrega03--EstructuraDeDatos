@@ -88,6 +88,8 @@ Para generar un instalador y archivos de menos de 25 MB cada uno, ejecuta:
 ```powershell
 .\build_finsim_parts.bat
 ```
+<img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/baa96376-3e75-4294-bb25-3fb48e5db36b" />
+
 
 La distribución aparece en `dist\FinSim-Partes`. Mantén juntos
 `FinSim-Setup.exe`, `FinSim-Partes.json` y todos los archivos
